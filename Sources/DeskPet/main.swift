@@ -1,0 +1,3 @@
+import DeskPetKit
+
+DeskPetMain.run()
