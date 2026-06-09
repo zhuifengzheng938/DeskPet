@@ -93,13 +93,20 @@ final class PetModel {
     var sparkle = false
     var isChatOpen = false
     var chatInput = ""
+    var activeAppStyle: ActiveAppStyle = .normal
+    var activeAppName = ""
     var chatMessages: [ChatMessage] = [
         ChatMessage(role: .assistant, text: "你可以说：打开 Safari、截图、查看电量、打开下载、常显示程序坞、来一句哲学名言、推荐一首民谣。")
     ]
 
+    @ObservationIgnored private var activeAppObserver: NSObjectProtocol?
     private var moodIndex = 0
     private var quoteIndex = 0
     private let moods: [PetMood] = [.curious, .happy, .focused, .playful, .sleepy]
+
+    init() {
+        startActiveAppMonitoring()
+    }
 
     var folderTitle: String {
         folderURL?.lastPathComponent ?? "未选择文件夹"
@@ -220,6 +227,40 @@ final class PetModel {
             isBlinking = false
         }
     }
+
+    private func startActiveAppMonitoring() {
+        updateActiveApp(NSWorkspace.shared.frontmostApplication)
+
+        activeAppObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+                return
+            }
+
+            Task { @MainActor [weak self] in
+                self?.updateActiveApp(app)
+            }
+        }
+    }
+
+    private func updateActiveApp(_ app: NSRunningApplication?) {
+        let bundleIdentifier = app?.bundleIdentifier ?? ""
+        guard !bundleIdentifier.hasPrefix("com.local.DeskPet") else { return }
+
+        let appName = app?.localizedName ?? ""
+        let nextStyle = ActiveAppStyle.detect(bundleIdentifier: bundleIdentifier, appName: appName)
+        guard nextStyle != activeAppStyle || appName != activeAppName else { return }
+
+        activeAppStyle = nextStyle
+        activeAppName = appName
+
+        guard nextStyle != .normal else { return }
+
+        mood = nextStyle.mood
+    }
 }
 
 enum PetAction {
@@ -252,6 +293,110 @@ struct AssistantResponse {
 struct AppSize {
     let name: String
     let kilobytes: Int64
+}
+
+enum ActiveAppStyle: Equatable {
+    case normal
+    case coding
+    case reading
+    case music
+    case chat
+    case ai
+
+    static func detect(bundleIdentifier: String, appName: String) -> ActiveAppStyle {
+        let bundle = bundleIdentifier.lowercased()
+        let name = appName.lowercased()
+
+        if bundle.contains("vscode")
+            || bundle.contains("visualstudiocode")
+            || bundle.contains("com.microsoft.vscode")
+            || bundle.contains("com.apple.dt.xcode")
+            || bundle.contains("jetbrains")
+            || name.contains("visual studio code")
+            || name.contains("vscode")
+            || name == "code"
+            || name.contains("xcode")
+            || name.contains("cursor")
+            || name.contains("trae") {
+            return .coding
+        }
+
+        if bundle.contains("wps")
+            || bundle.contains("kingsoft")
+            || name.contains("wps")
+            || name.contains("writer")
+            || name.contains("pages")
+            || name.contains("preview")
+            || name.contains("预览") {
+            return .reading
+        }
+
+        if bundle.contains("qqmusic")
+            || bundle.contains("music")
+            || bundle.contains("spotify")
+            || bundle.contains("netease")
+            || name.contains("qq音乐")
+            || name.contains("音乐")
+            || name.contains("music")
+            || name.contains("spotify")
+            || name.contains("网易云音乐") {
+            return .music
+        }
+
+        if bundle.contains("wechat")
+            || bundle.contains("tencent.qq")
+            || bundle.contains("telegram")
+            || bundle.contains("discord")
+            || bundle.contains("slack")
+            || bundle.contains("lark")
+            || bundle.contains("feishu")
+            || bundle.contains("dingtalk")
+            || bundle.contains("teams")
+            || name.contains("微信")
+            || name == "qq"
+            || name.contains("telegram")
+            || name.contains("discord")
+            || name.contains("slack")
+            || name.contains("飞书")
+            || name.contains("lark")
+            || name.contains("钉钉")
+            || name.contains("teams") {
+            return .chat
+        }
+
+        if bundle.contains("chatgpt")
+            || bundle.contains("openai")
+            || bundle.contains("claude")
+            || bundle.contains("poe")
+            || bundle.contains("gemini")
+            || bundle.contains("perplexity")
+            || bundle.contains("copilot")
+            || name.contains("chatgpt")
+            || name.contains("claude")
+            || name.contains("poe")
+            || name.contains("gemini")
+            || name.contains("perplexity")
+            || name.contains("copilot")
+            || name.contains("通义")
+            || name.contains("豆包")
+            || name.contains("kimi") {
+            return .ai
+        }
+
+        return .normal
+    }
+
+    var mood: PetMood {
+        switch self {
+        case .normal: .curious
+        case .coding: .focused
+        case .reading: .focused
+        case .music: .playful
+        case .chat: .happy
+        case .ai: .focused
+        }
+    }
+
 }
 
 struct PhilosophyQuote {
@@ -1160,10 +1305,22 @@ struct PetBody: View {
                 )
                 .offset(y: -54 + bob * 0.45)
 
-                PandaPetBody(accent: pet.mood.accentColor, isHovering: isHovering, mood: pet.mood, phase: phase)
+                PandaPetBody(
+                    accent: pet.mood.accentColor,
+                    isHovering: isHovering,
+                    mood: pet.mood,
+                    appStyle: pet.activeAppStyle,
+                    phase: phase
+                )
                     .offset(y: 34 + bob * 0.45)
 
-                PandaPetHead(accent: pet.mood.accentColor, mood: pet.mood, isHovering: isHovering, phase: phase)
+                PandaPetHead(
+                    accent: pet.mood.accentColor,
+                    mood: pet.mood,
+                    appStyle: pet.activeAppStyle,
+                    isHovering: isHovering,
+                    phase: phase
+                )
                     .offset(y: bob)
                     .rotationEffect(.degrees(lean))
                     .scaleEffect(breathe ? 1.015 : 0.995)
@@ -1189,6 +1346,8 @@ struct PetBody: View {
                     SparkleRing(color: pet.mood.accentColor, phase: phase)
                         .transition(.opacity.combined(with: .scale))
                 }
+
+                ContextAccessory(style: pet.activeAppStyle, accent: pet.mood.accentColor, phase: phase)
             }
         }
     }
@@ -1197,6 +1356,7 @@ struct PetBody: View {
 struct PandaPetHead: View {
     let accent: Color
     let mood: PetMood
+    let appStyle: ActiveAppStyle
     let isHovering: Bool
     let phase: TimeInterval
 
@@ -1221,6 +1381,7 @@ struct PandaPetHead: View {
 
             MascotCrest(accent: accent, phase: phase)
                 .offset(y: -51)
+                .opacity(appStyle == .ai ? 0 : 1)
 
             SoftPixel(size: 16, color: Color.white.opacity(0.42), radius: 6)
                 .offset(x: -35, y: -26)
@@ -1232,6 +1393,7 @@ struct PandaPetBody: View {
     let accent: Color
     let isHovering: Bool
     let mood: PetMood
+    let appStyle: ActiveAppStyle
     let phase: TimeInterval
 
     var body: some View {
@@ -1282,7 +1444,235 @@ struct PandaPetBody: View {
                     SoftPixel(size: 5, color: PixelTheme.ink.opacity(0.42), radius: 2)
                 }
                 .offset(y: 18)
+                .opacity(appStyle == .reading || appStyle == .ai ? 0 : 1)
             }
+        }
+    }
+}
+
+struct ContextAccessory: View {
+    let style: ActiveAppStyle
+    let accent: Color
+    let phase: TimeInterval
+
+    var body: some View {
+        ZStack {
+            switch style {
+            case .normal:
+                EmptyView()
+            case .coding:
+                CodingAccessory(accent: accent, phase: phase)
+                    .offset(y: 42)
+            case .reading:
+                ReadingAccessory(accent: accent, phase: phase)
+                    .offset(y: 43)
+            case .music:
+                HeadphoneAccessory(accent: accent, phase: phase)
+                    .offset(y: -8)
+            case .chat:
+                ChatAccessory(accent: accent, phase: phase)
+                    .offset(x: 44, y: -42)
+            case .ai:
+                RobotAccessory(accent: accent, phase: phase)
+                    .offset(y: -12)
+            }
+        }
+        .allowsHitTesting(false)
+        .transition(.scale.combined(with: .opacity))
+    }
+}
+
+struct ChatAccessory: View {
+    let accent: Color
+    let phase: TimeInterval
+
+    var body: some View {
+        ZStack {
+            bubble(width: 42, height: 25, opacity: 0.95)
+                .offset(x: CGFloat(sin(phase * 2.3)) * 1.2, y: CGFloat(cos(phase * 2.0)) * 1.1)
+
+            bubble(width: 28, height: 18, opacity: 0.78)
+                .scaleEffect(0.92)
+                .offset(x: -24, y: 24 + CGFloat(sin(phase * 2.6)) * 1.0)
+                .opacity(0.86)
+        }
+    }
+
+    private func bubble(width: CGFloat, height: CGFloat, opacity: Double) -> some View {
+        ZStack(alignment: .bottomTrailing) {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(PixelTheme.paper.opacity(opacity))
+                .frame(width: width, height: height)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(accent.opacity(0.72), lineWidth: 1.4)
+                )
+                .shadow(color: PixelTheme.ink.opacity(0.10), radius: 4, x: 0, y: 2)
+
+            HStack(spacing: 3) {
+                Circle().fill(accent.opacity(0.82)).frame(width: 4, height: 4)
+                Circle().fill(accent.opacity(0.62)).frame(width: 4, height: 4)
+                Circle().fill(accent.opacity(0.82)).frame(width: 4, height: 4)
+            }
+            .offset(x: -10, y: -10)
+
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(PixelTheme.paper.opacity(opacity))
+                .frame(width: 9, height: 9)
+                .rotationEffect(.degrees(35))
+                .offset(x: -5, y: 3)
+        }
+    }
+}
+
+struct CodingAccessory: View {
+    let accent: Color
+    let phase: TimeInterval
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(PixelTheme.ink.opacity(0.90))
+                .frame(width: 66, height: 36)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(accent.opacity(0.80), lineWidth: 1.4)
+                )
+
+            VStack(spacing: 4) {
+                HStack(spacing: 4) {
+                    SoftPixel(size: 5, color: Color.green.opacity(0.90), radius: 2)
+                    RoundedRectangle(cornerRadius: 2, style: .continuous)
+                        .fill(Color.white.opacity(0.72))
+                        .frame(width: 22, height: 4)
+                }
+                HStack(spacing: 4) {
+                    RoundedRectangle(cornerRadius: 2, style: .continuous)
+                        .fill(accent.opacity(0.85))
+                        .frame(width: 14 + CGFloat(sin(phase * 4.5)) * 4, height: 4)
+                    RoundedRectangle(cornerRadius: 2, style: .continuous)
+                        .fill(Color.white.opacity(0.50))
+                        .frame(width: 18, height: 4)
+                }
+            }
+
+            Capsule()
+                .fill(PixelTheme.ink.opacity(0.55))
+                .frame(width: 34, height: 5)
+                .offset(y: 22)
+        }
+    }
+}
+
+struct ReadingAccessory: View {
+    let accent: Color
+    let phase: TimeInterval
+
+    var body: some View {
+        HStack(spacing: -2) {
+            page(rotation: -8, x: 1)
+            page(rotation: 8, x: -1)
+        }
+        .offset(y: CGFloat(sin(phase * 2.1)) * 0.8)
+    }
+
+    private func page(rotation: Double, x: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(PixelTheme.paper.opacity(0.95))
+            .frame(width: 34, height: 34)
+            .overlay(
+                VStack(spacing: 4) {
+                    RoundedRectangle(cornerRadius: 2).fill(PixelTheme.ink.opacity(0.26)).frame(width: 19, height: 3)
+                    RoundedRectangle(cornerRadius: 2).fill(PixelTheme.ink.opacity(0.20)).frame(width: 16, height: 3)
+                    RoundedRectangle(cornerRadius: 2).fill(accent.opacity(0.35)).frame(width: 18, height: 3)
+                }
+            )
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(PixelTheme.rim, lineWidth: 1.2))
+            .rotationEffect(.degrees(rotation))
+            .offset(x: x)
+    }
+}
+
+struct HeadphoneAccessory: View {
+    let accent: Color
+    let phase: TimeInterval
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .trim(from: 0.58, to: 0.94)
+                .stroke(PixelTheme.ink.opacity(0.88), style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                .frame(width: 126, height: 126)
+                .rotationEffect(.degrees(4))
+
+            HStack(spacing: 88) {
+                pad
+                pad
+            }
+            .offset(y: 2 + CGFloat(sin(phase * 3.2)) * 1.2)
+
+            HStack(spacing: 10) {
+                SoftPixel(size: 5, color: accent.opacity(0.86), radius: 2)
+                SoftPixel(size: 4, color: accent.opacity(0.55), radius: 2)
+                SoftPixel(size: 5, color: accent.opacity(0.86), radius: 2)
+            }
+            .offset(y: 55)
+        }
+    }
+
+    private var pad: some View {
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(PixelTheme.ink.opacity(0.92))
+            .frame(width: 18, height: 34)
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(accent.opacity(0.34))
+                    .frame(width: 9, height: 20)
+            )
+    }
+}
+
+struct RobotAccessory: View {
+    let accent: Color
+    let phase: TimeInterval
+
+    var body: some View {
+        ZStack {
+            VStack(spacing: 2) {
+                Capsule()
+                    .fill(PixelTheme.ink.opacity(0.78))
+                    .frame(width: 4, height: 18)
+                Circle()
+                    .fill(accent.opacity(0.88))
+                    .frame(width: 10, height: 10)
+                    .scaleEffect(1.0 + CGFloat(sin(phase * 4.0)) * 0.08)
+            }
+            .offset(y: -55)
+
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(PixelTheme.ink.opacity(0.86))
+                .frame(width: 64, height: 28)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(accent.opacity(0.85), lineWidth: 1.5)
+                )
+                .offset(y: -5)
+
+            HStack(spacing: 18) {
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(accent.opacity(0.95))
+                    .frame(width: 10, height: 7)
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(accent.opacity(0.95))
+                    .frame(width: 10, height: 7)
+            }
+            .offset(y: -5)
+
+            HStack(spacing: 72) {
+                Circle().fill(accent.opacity(0.72)).frame(width: 8, height: 8)
+                Circle().fill(accent.opacity(0.72)).frame(width: 8, height: 8)
+            }
+            .offset(y: 0)
         }
     }
 }
